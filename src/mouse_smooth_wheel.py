@@ -17,6 +17,7 @@ Stop:
 
 import argparse
 import ctypes
+from pathlib import Path
 import sys
 import threading
 import time
@@ -32,7 +33,10 @@ if sys.platform != "win32":
 # Windows constants
 # ============================================================
 
+IMAGE_ICON = 1
 
+LR_LOADFROMFILE = 0x00000010
+LR_DEFAULTSIZE = 0x00000040
 GA_ROOT = 2
 
 WH_MOUSE_LL = 14
@@ -318,6 +322,16 @@ user32.PostQuitMessage.restype = None
 user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
 user32.LoadIconW.restype = wintypes.HICON
 
+user32.LoadImageW.argtypes = [
+    wintypes.HINSTANCE,
+    wintypes.LPCWSTR,
+    wintypes.UINT,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.UINT,
+]
+user32.LoadImageW.restype = wintypes.HANDLE
+
 user32.CreatePopupMenu.argtypes = []
 user32.CreatePopupMenu.restype = wintypes.HMENU
 
@@ -469,6 +483,45 @@ tray_app = None
 # ============================================================
 # Utility functions
 # ============================================================
+
+def get_app_icon_path() -> Path:
+    current_file = Path(__file__).resolve()
+
+    # Case 1:
+    #   MouseSmoothWheel/src/mouse_smooth_wheel.py
+    #   MouseSmoothWheel/assets/mousesmoothwheel.ico
+    if current_file.parent.name == "src":
+        project_root = current_file.parents[1]
+    else:
+        # Case 2:
+        #   MouseSmoothWheel/mouse_smooth_wheel.py
+        #   MouseSmoothWheel/assets/mousesmoothwheel.ico
+        project_root = current_file.parent
+
+    return project_root / "assets" / "mousesmoothwheel.ico"
+
+
+def load_app_icon():
+    icon_path = get_app_icon_path()
+
+    if icon_path.exists():
+        icon_handle = user32.LoadImageW(
+            None,
+            str(icon_path),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        )
+
+        if icon_handle:
+            return icon_handle
+
+    # Fallback: Windows default application icon
+    icon_resource = ctypes.cast(ctypes.c_void_p(IDI_APPLICATION), wintypes.LPCWSTR)
+    return user32.LoadIconW(None, icon_resource)
+
+
 
 def get_root_window_from_point(point: POINT) -> int:
 
@@ -674,6 +727,7 @@ class TrayApp:
         self.hinstance = kernel32.GetModuleHandleW(None)
         self.hwnd = None
         self.icon_added = False
+        self.icon_handle = load_app_icon()
 
         # Keep callback alive. If this gets garbage-collected, Windows can crash the process.
         self._wnd_proc = WNDPROC(self._handle_window_message)
@@ -697,7 +751,7 @@ class TrayApp:
         wndclass.cbClsExtra = 0
         wndclass.cbWndExtra = 0
         wndclass.hInstance = self.hinstance
-        wndclass.hIcon = None
+        wndclass.hIcon = self.icon_handle
         wndclass.hCursor = None
         wndclass.hbrBackground = None
         wndclass.lpszMenuName = None
@@ -725,16 +779,13 @@ class TrayApp:
             raise RuntimeError(f"Failed to create tray window. {get_last_error_message()}")
 
     def _add_tray_icon(self) -> None:
-        icon_resource = ctypes.cast(ctypes.c_void_p(IDI_APPLICATION), wintypes.LPCWSTR)
-        icon_handle = user32.LoadIconW(None, icon_resource)
-
         nid = NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
         nid.hWnd = self.hwnd
         nid.uID = 1
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
-        nid.hIcon = icon_handle
+        nid.hIcon = self.icon_handle
         nid.szTip = "MouseSmoothWheel"
 
         ok = shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
