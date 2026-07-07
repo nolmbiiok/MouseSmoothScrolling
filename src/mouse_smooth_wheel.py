@@ -88,7 +88,6 @@ IDI_APPLICATION = 32512
 ID_SCROLL_LOW = 1001
 ID_SCROLL_NORMAL = 1002
 ID_SCROLL_STRONG = 1003
-ID_SCROLL_LONG = 1004
 ID_EXIT = 1099
 
 
@@ -372,34 +371,43 @@ shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 class Config:
     gain: float = 0.14
     friction: float = 0.90
-    tick_rate: int = 90
-    min_send_delta: int = 10
-    max_delta_per_tick: int = 60
+    tick_rate: int = 120
     stop_velocity: float = 0.5
-    preset: str = "Normal"
+    preset: str = "Low"
     quiet: bool = False
 
     keyboard_soft_stop_friction: float = 0.68
     keyboard_soft_stop_velocity_scale: float = 0.35
 
-    repeat_wheel_boost: float = 3.0
-    repeat_wheel_boost_step: float = 0.7
-    repeat_wheel_boost_max: float = 5.0
-    repeat_wheel_chain_seconds: float = 0.45
-    max_velocity: float = 780.0
-    max_boosted_delta_per_tick: int = 380
+    same_direction_kick_enabled: bool = False
+    same_direction_kick_multiplier: float = 0.0
+    same_direction_kick_max_delta: int = 0
+
+    repeat_wheel_boost: float = 6.0
+    repeat_wheel_boost_step: float = 2.0
+    repeat_wheel_boost_max: float = 16.0
+    repeat_wheel_chain_seconds: float = 0.55
+    max_velocity: float = 12000.0
+    max_boosted_delta_per_tick: int = 1200
+
 
     intercept_physical_wheel: bool = True
 
-    smooth_step_gain: float = 0.32
+    smooth_step_gain: float = 0.12
     smooth_step_friction: float = 0.72
     smooth_min_send_delta: int = 4
     smooth_max_delta_per_tick: int = 36
 
     no_inertia_events: int = 3
-    gesture_reset_seconds: float = 0.30
+    gesture_reset_seconds: float = 0.10
 
     cancel_on_window_change: bool = True
+
+
+    tail_velocity_threshold: float = 20.0
+    tail_friction: float = 0.92
+    tail_min_send_delta: int = 1
+    tail_max_delta_per_tick: int = 24
 
 
 
@@ -425,36 +433,29 @@ class RuntimeState:
 
 PRESETS = {
     "Low": {
-        "gain": 0.08,
-        "friction": 0.86,
-        "min_send_delta": 14,
-        "max_delta_per_tick": 45,
+        "gain": 0.04,
+        "friction": 0.94,
+        "min_send_delta": 4,
+        "max_delta_per_tick": 36,
     },
     "Normal": {
-        "gain": 0.14,
-        "friction": 0.92,
-        "min_send_delta": 10,
-        "max_delta_per_tick": 60,
+        "gain": 0.04,
+        "friction": 0.94,
+        "min_send_delta": 4,
+        "max_delta_per_tick": 36,
     },
     "Strong": {
-        "gain": 0.18,
-        "friction": 0.92,
-        "min_send_delta": 8,
-        "max_delta_per_tick": 70,
-    },
-    "Long": {
-        "gain": 0.22,
-        "friction": 0.94,
-        "min_send_delta": 8,
-        "max_delta_per_tick": 80,
-    },
+        "gain": 0.08,
+        "friction": 0.95,
+        "min_send_delta": 4,
+        "max_delta_per_tick": 36,
+    }
 }
 
 COMMAND_TO_PRESET = {
     ID_SCROLL_LOW: "Low",
     ID_SCROLL_NORMAL: "Normal",
     ID_SCROLL_STRONG: "Strong",
-    ID_SCROLL_LONG: "Long",
 }
 
 config = Config()
@@ -783,10 +784,9 @@ class TrayApp:
             return
 
         try:
-            self._append_preset_menu_item(menu, ID_SCROLL_LOW, "Low - short tail", "Low")
+            self._append_preset_menu_item(menu, ID_SCROLL_LOW, "Low", "Low")
             self._append_preset_menu_item(menu, ID_SCROLL_NORMAL, "Normal", "Normal")
             self._append_preset_menu_item(menu, ID_SCROLL_STRONG, "Strong", "Strong")
-            self._append_preset_menu_item(menu, ID_SCROLL_LONG, "Long - longest tail", "Long")
 
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(menu, MF_STRING, ID_EXIT, "Exit")
@@ -833,7 +833,7 @@ class TrayApp:
             return
 
     def _cycle_preset(self) -> None:
-        order = ["Low", "Normal", "Strong", "Long"]
+        order = ["Low", "Normal", "Strong"]
 
         try:
             index = order.index(config.preset)
@@ -878,6 +878,25 @@ def mouse_hook_proc(n_code, w_param, l_param):
                     now - state.last_wheel_time > config.gesture_reset_seconds
                 )
 
+                wheel_direction = 1 if delta > 0 else -1
+
+                active_motion_direction = 0
+                if abs(state.velocity) >= config.stop_velocity:
+                    active_motion_direction = 1 if state.velocity > 0 else -1
+                elif abs(state.accumulator) > 0:
+                    active_motion_direction = 1 if state.accumulator > 0 else -1
+
+                opposite_direction_during_inertia = (
+                    was_inertia_active
+                    and active_motion_direction != 0
+                    and active_motion_direction != wheel_direction
+                )
+
+                if opposite_direction_during_inertia:
+                    cancel_inertia()
+                    return 1
+
+
                 # New gesture reset should only happen when inertia is already dead.
                 # If inertia is still alive, additional wheel input means acceleration,
                 # not "first 3 no-inertia events" again.
@@ -909,16 +928,13 @@ def mouse_hook_proc(n_code, w_param, l_param):
                 )
 
                 if is_no_inertia_phase:
-                    # First N wheel events are not long-tail inertia.
-                    # They are still converted into a short smooth burst
-                    # so the original one-line jump is not visible.
-                    state.short_smoothing = True
-                    state.velocity += delta * config.smooth_step_gain
-                    state.velocity = clamp(
-                        state.velocity,
-                        -config.max_velocity,
-                        config.max_velocity,
-                    )
+                    # First N wheel events pass through as normal physical wheel input.
+                    # No inertia, no smoothing, no synthetic wheel.
+                    state.short_smoothing = False
+                    state.velocity = 0.0
+                    state.accumulator = 0.0
+
+                    return user32.CallNextHookEx(hook_handle, n_code, w_param, l_param)
                 else:
                     state.short_smoothing = False
 
@@ -951,6 +967,8 @@ def mouse_hook_proc(n_code, w_param, l_param):
 
                         state.last_repeat_boost_time = now
                         state.last_wheel_direction = direction
+
+
                     else:
                         state.repeat_boost_count = 0
                         state.last_repeat_boost_time = 0.0
@@ -970,6 +988,7 @@ def mouse_hook_proc(n_code, w_param, l_param):
         # Otherwise the app receives the raw one-line wheel first,
         # and the scroll still looks stepped.
         return 1
+    
 
     return user32.CallNextHookEx(hook_handle, n_code, w_param, l_param)
 
@@ -1012,9 +1031,22 @@ def inertia_worker() -> None:
         send_delta = 0
 
         with state_lock:
+            inertia_min_delta = (
+                config.tail_min_send_delta
+                if (
+                    not state.short_smoothing
+                    and abs(state.velocity) < config.tail_velocity_threshold
+                )
+                else (
+                    config.smooth_min_send_delta
+                    if state.short_smoothing
+                    else config.min_send_delta
+                )
+            )
+
             has_active_inertia = (
                 abs(state.velocity) >= config.stop_velocity
-                or abs(state.accumulator) >= config.min_send_delta
+                or abs(state.accumulator) >= inertia_min_delta
             )
 
         # Target window guard:
@@ -1032,11 +1064,18 @@ def inertia_worker() -> None:
                 continue
 
         with state_lock:
-            active_min_delta = (
-                config.smooth_min_send_delta
-                if state.short_smoothing
-                else config.min_send_delta
+            is_tail_phase = (
+                not state.short_smoothing
+                and not state.soft_stopping
+                and abs(state.velocity) < config.tail_velocity_threshold
             )
+
+            if state.short_smoothing:
+                active_min_delta = config.smooth_min_send_delta
+            elif is_tail_phase:
+                active_min_delta = config.tail_min_send_delta
+            else:
+                active_min_delta = config.min_send_delta
 
             if (
                 abs(state.velocity) < config.stop_velocity
@@ -1055,11 +1094,12 @@ def inertia_worker() -> None:
                     state.accumulator = 0.0
                     send_delta = 0
                 else:
-                    current_friction = (
-                        config.smooth_step_friction
-                        if state.short_smoothing
-                        else config.friction
-                    )
+                    if state.short_smoothing:
+                        current_friction = config.smooth_step_friction
+                    elif is_tail_phase:
+                        current_friction = config.tail_friction
+                    else:
+                        current_friction = config.friction
 
                     state.velocity *= current_friction
                     state.accumulator += state.velocity
@@ -1067,6 +1107,8 @@ def inertia_worker() -> None:
                     if abs(state.accumulator) >= active_min_delta:
                         if state.short_smoothing:
                             dynamic_max_delta = config.smooth_max_delta_per_tick
+                        elif is_tail_phase:
+                            dynamic_max_delta = config.tail_max_delta_per_tick
                         else:
                             dynamic_max_delta = min(
                                 config.max_boosted_delta_per_tick,
@@ -1176,16 +1218,16 @@ def parse_args() -> Config:
 
     parser.add_argument(
         "--preset",
-        choices=["Low", "Normal", "Strong", "Long"],
-        default="Normal",
-        help="Initial inertia preset. Default: Normal",
+        choices=["Low", "Normal", "Strong"],
+        default="Low",
+        help="Initial inertia preset. Default: Low",
     )
 
     parser.add_argument(
         "--tick-rate",
         type=int,
-        default=90,
-        help="Worker update rate per second. Default: 90",
+        default=120,
+        help="Worker update rate per second. Default: 120",
     )
 
     parser.add_argument(
