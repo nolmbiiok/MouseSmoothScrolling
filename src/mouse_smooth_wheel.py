@@ -412,7 +412,7 @@ class Config:
     smooth_min_send_delta: int = 4
     smooth_max_delta_per_tick: int = 36
 
-    no_inertia_events: int = 3
+    no_inertia_events: int = 4
     gesture_reset_seconds: float = 0.10
 
     cancel_on_window_change: bool = True
