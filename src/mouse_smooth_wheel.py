@@ -45,9 +45,8 @@ HC_ACTION = 0
 WH_KEYBOARD_LL = 13
 
 WM_KEYDOWN = 0x0100
-WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
-WM_SYSKEYUP = 0x0105
+
 
 LLKHF_LOWER_IL_INJECTED = 0x00000002
 LLKHF_INJECTED = 0x00000010
@@ -387,15 +386,16 @@ class Config:
     friction: float = 0.90
     tick_rate: int = 120
     stop_velocity: float = 0.5
-    preset: str = "Low"
+    preset: str = "Medium"
     quiet: bool = False
 
     keyboard_soft_stop_friction: float = 0.68
     keyboard_soft_stop_velocity_scale: float = 0.35
 
-    same_direction_kick_enabled: bool = False
-    same_direction_kick_multiplier: float = 0.0
-    same_direction_kick_max_delta: int = 0
+
+
+    initial_inertia_boost: float = 7.0
+    initial_inertia_min_velocity: float = 48.0
 
     repeat_wheel_boost: float = 6.0
     repeat_wheel_boost_step: float = 2.0
@@ -407,12 +407,11 @@ class Config:
 
     intercept_physical_wheel: bool = True
 
-    smooth_step_gain: float = 0.12
     smooth_step_friction: float = 0.72
     smooth_min_send_delta: int = 4
     smooth_max_delta_per_tick: int = 36
 
-    no_inertia_events: int = 4
+    no_inertia_events: int = 3
     gesture_reset_seconds: float = 0.10
 
     cancel_on_window_change: bool = True
@@ -439,7 +438,6 @@ class RuntimeState:
     last_wheel_direction: int = 0
 
     soft_stopping: bool = False    
-    short_smoothing: bool = False
 
     wheel_event_count: int = 0
     last_wheel_time: float = 0.0
@@ -588,22 +586,16 @@ def cancel_inertia() -> None:
 
     state.wheel_event_count = 0
     state.last_wheel_time = 0.0
-    state.short_smoothing = False
 
     state.repeat_boost_count = 0
     state.last_repeat_boost_time = 0.0
     state.last_wheel_direction = 0
 
+    
 def has_active_inertia_locked() -> bool:
-    active_min_delta = (
-        config.smooth_min_send_delta
-        if state.short_smoothing
-        else config.min_send_delta
-    )
-
     return (
         abs(state.velocity) >= config.stop_velocity
-        or abs(state.accumulator) >= active_min_delta
+        or abs(state.accumulator) >= config.min_send_delta
     )
 
 
@@ -955,7 +947,6 @@ def mouse_hook_proc(n_code, w_param, l_param):
                     state.wheel_event_count = 0
                     state.velocity = 0.0
                     state.accumulator = 0.0
-                    state.short_smoothing = False
 
                 # If inertia is alive, force the counter past the no-inertia phase.
                 if was_inertia_active:
@@ -978,16 +969,20 @@ def mouse_hook_proc(n_code, w_param, l_param):
                     and state.wheel_event_count <= config.no_inertia_events
                 )
 
+                is_initial_inertia_entry = (
+                    not was_inertia_active
+                    and state.wheel_event_count == config.no_inertia_events + 1
+                )
+
+
                 if is_no_inertia_phase:
                     # First N wheel events pass through as normal physical wheel input.
                     # No inertia, no smoothing, no synthetic wheel.
-                    state.short_smoothing = False
                     state.velocity = 0.0
                     state.accumulator = 0.0
 
                     return user32.CallNextHookEx(hook_handle, n_code, w_param, l_param)
                 else:
-                    state.short_smoothing = False
 
                     # If the user wheels again in the same direction while inertia is alive,
                     # treat it as intentional acceleration.
@@ -1004,7 +999,16 @@ def mouse_hook_proc(n_code, w_param, l_param):
                         and now - state.last_repeat_boost_time <= config.repeat_wheel_chain_seconds
                     )
 
-                    if was_inertia_active and same_direction:
+                    if is_initial_inertia_entry:
+                        # First wheel event after the no-inertia phase.
+                        # Give it a one-time stronger push so inertia starts immediately.
+                        boost = config.initial_inertia_boost
+
+                        state.repeat_boost_count = 0
+                        state.last_repeat_boost_time = now
+                        state.last_wheel_direction = direction
+
+                    elif was_inertia_active and same_direction:
                         if can_chain_repeat_boost:
                             state.repeat_boost_count += 1
                         else:
@@ -1019,15 +1023,19 @@ def mouse_hook_proc(n_code, w_param, l_param):
                         state.last_repeat_boost_time = now
                         state.last_wheel_direction = direction
 
-
                     else:
                         state.repeat_boost_count = 0
                         state.last_repeat_boost_time = 0.0
                         state.last_wheel_direction = direction
                         boost = 1.0
-
                     state.velocity += delta * config.gain * boost
-                    
+
+                    if is_initial_inertia_entry:
+                        state.velocity = direction * max(
+                            abs(state.velocity),
+                            config.initial_inertia_min_velocity,
+                        )
+
                     state.velocity = clamp(
                         state.velocity,
                         -config.max_velocity,
@@ -1074,7 +1082,6 @@ def keyboard_hook_proc(n_code, w_param, l_param):
 # ============================================================
 # Inertia worker
 # ============================================================
-
 def inertia_worker() -> None:
     tick_interval = 1.0 / max(1, config.tick_rate)
 
@@ -1084,15 +1091,8 @@ def inertia_worker() -> None:
         with state_lock:
             inertia_min_delta = (
                 config.tail_min_send_delta
-                if (
-                    not state.short_smoothing
-                    and abs(state.velocity) < config.tail_velocity_threshold
-                )
-                else (
-                    config.smooth_min_send_delta
-                    if state.short_smoothing
-                    else config.min_send_delta
-                )
+                if abs(state.velocity) < config.tail_velocity_threshold
+                else config.min_send_delta
             )
 
             has_active_inertia = (
@@ -1116,14 +1116,11 @@ def inertia_worker() -> None:
 
         with state_lock:
             is_tail_phase = (
-                not state.short_smoothing
-                and not state.soft_stopping
+                not state.soft_stopping
                 and abs(state.velocity) < config.tail_velocity_threshold
             )
 
-            if state.short_smoothing:
-                active_min_delta = config.smooth_min_send_delta
-            elif is_tail_phase:
+            if is_tail_phase:
                 active_min_delta = config.tail_min_send_delta
             else:
                 active_min_delta = config.min_send_delta
@@ -1135,7 +1132,6 @@ def inertia_worker() -> None:
                 state.velocity = 0.0
                 state.accumulator = 0.0
                 state.soft_stopping = False
-                state.short_smoothing = False
             else:
                 if state.soft_stopping:
                     # Keyboard input occurred during inertia.
@@ -1145,9 +1141,7 @@ def inertia_worker() -> None:
                     state.accumulator = 0.0
                     send_delta = 0
                 else:
-                    if state.short_smoothing:
-                        current_friction = config.smooth_step_friction
-                    elif is_tail_phase:
+                    if is_tail_phase:
                         current_friction = config.tail_friction
                     else:
                         current_friction = config.friction
@@ -1156,9 +1150,7 @@ def inertia_worker() -> None:
                     state.accumulator += state.velocity
 
                     if abs(state.accumulator) >= active_min_delta:
-                        if state.short_smoothing:
-                            dynamic_max_delta = config.smooth_max_delta_per_tick
-                        elif is_tail_phase:
+                        if is_tail_phase:
                             dynamic_max_delta = config.tail_max_delta_per_tick
                         else:
                             dynamic_max_delta = min(
@@ -1178,13 +1170,10 @@ def inertia_worker() -> None:
                         )
                         state.accumulator -= send_delta
 
-
         if send_delta != 0:
             send_wheel_delta(send_delta)
 
         time.sleep(tick_interval)
-
-
 # ============================================================
 # Hook install / message loop
 # ============================================================
