@@ -386,7 +386,7 @@ class Config:
     friction: float = 0.90
     tick_rate: int = 120
     stop_velocity: float = 0.5
-    preset: str = "Medium"
+    preset: str = "Normal"
     quiet: bool = False
 
     keyboard_soft_stop_friction: float = 0.68
@@ -411,7 +411,8 @@ class Config:
     smooth_min_send_delta: int = 4
     smooth_max_delta_per_tick: int = 36
 
-    no_inertia_events: int = 3
+    no_inertia_events_up: int = 2
+    no_inertia_events_down: int = 3
     gesture_reset_seconds: float = 0.10
 
     cancel_on_window_change: bool = True
@@ -451,10 +452,10 @@ PRESETS = {
         "max_delta_per_tick": 36,
     },
     "Normal": {
-        "gain": 0.04,
+        "gain": 0.06,
         "friction": 0.94,
         "min_send_delta": 4,
-        "max_delta_per_tick": 36,
+        "max_delta_per_tick": 50,
     },
     "Strong": {
         "gain": 0.08,
@@ -597,6 +598,18 @@ def has_active_inertia_locked() -> bool:
         abs(state.velocity) >= config.stop_velocity
         or abs(state.accumulator) >= config.min_send_delta
     )
+
+
+def get_no_inertia_events_for_direction(direction: int) -> int:
+    """
+    Windows wheel delta:
+        direction > 0: wheel up
+        direction < 0: wheel down
+    """
+    if direction > 0:
+        return config.no_inertia_events_up
+
+    return config.no_inertia_events_down
 
 
 def should_cancel_inertia_for_window_change() -> bool:
@@ -923,6 +936,9 @@ def mouse_hook_proc(n_code, w_param, l_param):
 
                 wheel_direction = 1 if delta > 0 else -1
 
+                no_inertia_events = get_no_inertia_events_for_direction(wheel_direction)
+
+
                 active_motion_direction = 0
                 if abs(state.velocity) >= config.stop_velocity:
                     active_motion_direction = 1 if state.velocity > 0 else -1
@@ -942,7 +958,7 @@ def mouse_hook_proc(n_code, w_param, l_param):
 
                 # New gesture reset should only happen when inertia is already dead.
                 # If inertia is still alive, additional wheel input means acceleration,
-                # not "first 3 no-inertia events" again.
+                # not the no-inertia phase again.
                 if is_new_gesture and not was_inertia_active:
                     state.wheel_event_count = 0
                     state.velocity = 0.0
@@ -952,7 +968,7 @@ def mouse_hook_proc(n_code, w_param, l_param):
                 if was_inertia_active:
                     state.wheel_event_count = max(
                         state.wheel_event_count,
-                        config.no_inertia_events,
+                        no_inertia_events,
                     )
 
                 state.last_wheel_time = now
@@ -966,12 +982,12 @@ def mouse_hook_proc(n_code, w_param, l_param):
 
                 is_no_inertia_phase = (
                     not was_inertia_active
-                    and state.wheel_event_count <= config.no_inertia_events
+                    and state.wheel_event_count <= no_inertia_events
                 )
 
                 is_initial_inertia_entry = (
                     not was_inertia_active
-                    and state.wheel_event_count == config.no_inertia_events + 1
+                    and state.wheel_event_count == no_inertia_events + 1
                 )
 
 
@@ -1259,7 +1275,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--preset",
         choices=["Low", "Normal", "Strong"],
-        default="Low",
+        default="Normal",
         help="Initial inertia preset. Default: Low",
     )
 
