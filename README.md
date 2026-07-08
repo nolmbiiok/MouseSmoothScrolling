@@ -1,39 +1,36 @@
 ﻿# MouseSmoothWheel
 
-A lightweight Windows utility that adds smooth inertia scrolling to any mouse.
-
-MouseSmoothWheel makes normal mouse wheel scrolling feel smoother by adding a short inertia effect after each wheel input.
+MouseSmoothWheel is a lightweight Windows utility that makes mouse wheel scrolling smoother with an inertia-like effect.
 
 ## Features
 
-- Smooth inertia scrolling for mouse wheel input
+- Smooth inertia-style mouse wheel scrolling
 - Tray icon support
 - Low / Normal / Strong scroll presets
 - Quick exit from the tray menu
-- Works with most standard Windows applications
+- No installation required
+
+## Run
+
+Double-click the downloaded exe file.
+
+MouseSmoothWheel will run in the Windows tray area.
 
 ## Usage
 
 - Right-click the tray icon to change scroll strength or exit
 - Double-click the tray icon to cycle between presets
 
-## Behavior
+## Scrolling behavior
+
+MouseSmoothWheel keeps the first 3 wheel inputs close to normal Windows scrolling behavior.
 
 When the mouse wheel is scrolled quickly 4 or more times, MouseSmoothWheel switches to smooth inertia scrolling.
 
-Small wheel inputs remain close to normal Windows mouse wheel behavior.
-
-## Download
-
-Download the latest `MouseSmoothWheel-v*.exe` file from the [Releases](../../releases) page.
-
-For example:
-
-```text
-MouseSmoothWheel-v0.1.0.exe
-
+This helps prevent unwanted inertia during small or precise scrolling.
 
 ## Known issues
 
-- Remaining inertia input may continue even after the mouse cursor moves to another window.
-- Smooth scrolling may not feel perfectly smooth in some applications.
+- Remaining inertia scrolling may continue after the mouse cursor moves to another window.
+- Scrolling may not feel perfectly smooth in some applications.
+- Windows SmartScreen or antivirus software may warn about the unsigned executable.
